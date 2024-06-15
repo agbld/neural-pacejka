@@ -1,124 +1,106 @@
 #%%
-import os
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from model import CustomModel
-
-# 檢查是否有可用的 CUDA 支持的 GPU
-device = 'cpu' #torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f'Using device: {device}')
+from model import SimpleNN
 
 #%%
-# 1. 加載和預處理數據
-def transform_csv(input_csv):
-    # 讀取 CSV 檔案
-    data = input_csv
+raw_data = pd.read_csv('for_fit_csv.csv', header=None)
+raw_data = torch.tensor(raw_data.values, dtype=torch.float32)
 
-    # 預先定義新的 DataFrame，以便填充轉換後的數據
-    transformed_data = pd.DataFrame(columns=['Fz', 'ia', 'a', 'Fy0'])
+A = raw_data[:, :599]
+Fz = raw_data[:, 599]
+ia = raw_data[:, 600]
+Fy0 = raw_data[:, 601:]
 
-    # 對每一列（row）進行操作
-    with tqdm(total=len(data)) as pbar:
-        for index, row in data.iterrows():
-            a_values = row[0:599].values  # 第0到598(含)是 a
-            Fz_value = row[599]  # 第599個欄位是 Fz
-            ia_value = row[600]  # 第600個欄位是 ia
-            Fy0_values = row[601:].values  # 從第601個欄位開始到1199是 Fy0
+#%%
+A = A.reshape(-1, 1)
+Fz = Fz.unsqueeze(1).repeat(1, 599).reshape(-1, 1)
+ia = ia.unsqueeze(1).repeat(1, 599).reshape(-1, 1)
+Fy0 = Fy0.reshape(-1, 1)
 
-            # 對於每個 a 值和對應的 Fy0 值，創建一個新的行
-            for a, Fy0 in zip(a_values, Fy0_values):
-                transformed_row = {'Fz': Fz_value, 'ia': ia_value, 'a': a, 'Fy0': Fy0}
-                # transformed_data = transformed_data.append(transformed_row, ignore_index=True)
-                transformed_data = pd.concat([transformed_data, pd.DataFrame(transformed_row, index=[0])], ignore_index=True)
-            pbar.update(1)
+X = torch.cat((A, Fz, ia), dim=1)
 
-    return transformed_data
+y = Fy0
 
-if os.path.exists('transformed_data.csv'):
-    data = pd.read_csv('transformed_data.csv')
-else:
-    raw_data = pd.read_csv('for_fit_csv.csv', header=None)
-    data = transform_csv(raw_data)
-    data.to_csv('transformed_data.csv', index=False)
-X = data[['Fz', 'ia', 'a']].values
-y = data['Fy0'].values
-
-# 將數據轉換為 PyTorch 張量並移動到指定的設備（CPU 或 GPU）
-X = torch.tensor(X, dtype=torch.float32).to(device)
-y = torch.tensor(y, dtype=torch.float32).view(-1, 1).to(device)  # 調整形狀以匹配模型輸出
-
+#%%
 # 分割訓練集和測試集
-X_train, X_test, y_train, y_test = train_test_split(X.cpu().numpy(), y.cpu().numpy(), test_size=0.2, random_state=42)
-X_train, X_test, y_train, y_test = map(lambda x: torch.tensor(x, device=device), (X_train, X_test, y_train, y_test))
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
 
 # 封裝成 TensorDataset
 train_dataset = TensorDataset(X_train, y_train)
 test_dataset = TensorDataset(X_test, y_test)
 
 # 定義 DataLoader
-batch_size = 64  # 或根據您的 GPU 記憶體大小選擇其他批量大小
+batch_size = 1024  # 或根據您的 GPU 記憶體大小選擇其他批量大小
 train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
 
-
 #%%
 # 2. 定義模型
-model = CustomModel()
+model = SimpleNN(hidden_size=10)
 
 #%%
 # 3. 定義損失函數和優化器
-criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.0001)
+loss_fn = nn.MSELoss()
+mean_abs_error = nn.L1Loss()
+optimizer = optim.Adam(model.parameters(), lr=1e-2)
 
 #%%
 # 4. 訓練模型
-epochs = 1000
-for epoch in range(epochs):
-    model.train()
-    total_loss = 0
-    total_abs_error = 0
-    for X_batch, y_batch in train_loader:
-        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-        optimizer.zero_grad()
-        outputs = model(X_batch[:, 0], X_batch[:, 1], X_batch[:, 2])
-        loss = criterion(outputs, y_batch)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-        total_abs_error += torch.mean(torch.abs(outputs - y_batch)).item()
-    if epoch % 1 == 0:
-        print(f'Epoch {epoch+1}/{epochs}, Loss: {total_loss / len(train_loader)}, Abs. Averaged Error: {total_abs_error / len(train_loader)}')
+epochs = 20
+eval_steps = 100
 
+step_count = 0
+plot_train_x = []
+plot_train_loss = []
+plot_train_mean_abs_error = []
+plot_test_x = []
+plot_test_loss = []
+plot_test_mean_abs_error = []
 
+with tqdm(total=epochs) as pbar:
+    for epoch in range(epochs):
+        model.train()
+        for X_batch, y_batch in train_loader:
+            optimizer.zero_grad()
+            outputs = model(X_batch)
+            loss = loss_fn(outputs, y_batch)
+            loss.backward()
+            optimizer.step()
+            
+            # monitor and visualize
+            step_count += 1
+            plot_train_x.append(step_count)
+            plot_train_loss.append(loss.item())
+            plot_train_mean_abs_error.append(mean_abs_error(outputs, y_batch).item())
 
-epochs = 1000
-# with tqdm(total=epochs) as pbar:
-for epoch in range(epochs):
-    model.train()
-    
-    for X_batch, y_batch in train_loader:
-        optimizer.zero_grad()
-        outputs = model(X_train[:, 0], X_train[:, 1], X_train[:, 2])
-        loss = criterion(outputs, y_train)
-        loss.backward()
-        optimizer.step()
+            if step_count % eval_steps == 0:
+                with torch.no_grad():
+                    model.eval()
+                    predictions = model(X_test)
+                    test_loss = loss_fn(predictions, y_test)
+                    plot_test_x.append(step_count)
+                    plot_test_loss.append(test_loss.item())
+                    plot_test_mean_abs_error.append(mean_abs_error(predictions, y_test).item())
+        pbar.update(1)
 
-    if epoch % 1 == 0:
-        print(f'Epoch {epoch+1}/{epochs}, Loss: {loss.item()}, Abs. Averaged Error: {torch.mean(torch.abs(outputs - y_train)).item()}')
-        # pbar.update(1)
+    # plot
+    plt.figure()
+    plt.plot(plot_train_x, plot_train_loss, color='b', label='train_loss')
+    plt.plot(plot_test_x, plot_test_loss, color='r', label='test_loss')
+    plt.twinx()
+    plt.plot(plot_train_x, plot_train_mean_abs_error, 'r', color='g', label='train_mean_abs_error')
+    plt.plot(plot_test_x, plot_test_mean_abs_error, 'r', color='y')
+    plt.show()
 
-#%%
-# 5. 測試模型
-model.eval()
-with torch.no_grad():
-    predictions = model(X_test[:, 0], X_test[:, 1], X_test[:, 2])
-    test_loss = criterion(predictions, y_test)
-    print(f'Test Loss: {test_loss.item()}, Test Abs. Averaged Error: {torch.mean(torch.abs(predictions - y_test)).item()}')
+    # save model
+    torch.save(model.state_dict(), 'model.pth')
 
 #%%
